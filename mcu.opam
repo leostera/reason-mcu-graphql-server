@@ -9,10 +9,14 @@ homepage: "https//github.com/ostera/reason-mcu-graphql-server"
 bug-reports: "https//github.com/ostera/reason-mcu-graphql-server/issues"
 depends: [
   "fmt"
+  
   "httpaf"
   "httpaf-lwt"
   "logs"
   "lwt"
+
+  "graphql"
+  "graphql-lwt"
 
   "dune" {build}
   "reason" {build}
