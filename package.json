@@ -1,0 +1,31 @@
+{
+  "esy": {
+    "build": "refmterr dune build -p mcu-graphql-server",
+    "NOTE": "Optional release Section. Customizes result of `esy release`",
+    "release": {
+      "bin": [
+        "mcu_server"
+      ]
+    }
+  },
+  "dependencies": {
+    "@esy-ocaml/reason": "3.4.0",
+    "@opam/dune": "*",
+    "@opam/fmt": "*",
+    "@opam/graphql": "*",
+    "@opam/graphql-lwt": "*",
+    "@opam/httpkit": "*",
+    "@opam/httpkit-lwt": "*",
+    "@opam/logs": "*",
+    "@opam/merlin": "*",
+    "@opam/odoc": "*",
+    "ocaml": "~4.7.0",
+    "refmterr": "*"
+  },
+  "resolutions": {
+    "@opam/httpkit": "link:../httpkit/httpkit.opam",
+    "@opam/httpkit-lwt": "link:../httpkit/httpkit-lwt.opam",
+    "@opam/httpaf": "anmonteiro/httpaf:httpaf.opam#57e9dd2",
+    "@opam/httpaf-lwt": "anmonteiro/httpaf:httpaf-lwt.opam#57e9dd2"
+  }
+}
