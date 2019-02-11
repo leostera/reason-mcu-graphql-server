@@ -2,4 +2,5 @@
   (name server)
   (libraries
     httpkit httpkit-lwt lwt
-    graphql graphql-lwt schema))
+    graphql graphql-lwt schema
+    result))

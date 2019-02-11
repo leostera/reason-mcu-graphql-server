@@ -1,46 +1,47 @@
 module BodyParser: {
-  exception ParseError(string);
+  type error = [ | `ParseError(string)];
   let to_graphql:
     string =>
-    (
-      Graphql_parser.document,
-      list((string, Graphql_parser.const_value)),
-      string,
+    result(
+      (
+        Graphql_parser.document,
+        list((string, Graphql_parser.const_value)),
+        string,
+      ),
+      error,
     );
 } = {
-  exception ParseError(string);
+  type error = [ | `ParseError(string)];
 
   open Yojson.Basic;
 
-  let json_of_string = body_string =>
-    switch (body_string |> from_string) {
-    | json => json
-    | exception (Yojson.Json_error(err)) => raise(ParseError(err))
-    };
-
   let to_graphql = body_string => {
-    let json = body_string |> json_of_string;
-    switch (
-      json |> Util.member("query") |> Util.to_string,
-      json |> Util.member("variables") |> Util.to_assoc,
-      json |> Util.member("operationName") |> Util.to_string,
-    ) {
-    | (query, variables, operation_name) =>
-      switch (Graphql_parser.parse(query)) {
-      | Ok(doc) => (
-          doc,
-          (variables :> list((string, Graphql_parser.const_value))),
-          operation_name,
+    switch (body_string |> from_string) {
+    | json =>
+      switch (
+        json |> Util.member("query") |> Util.to_string,
+        json |> Util.member("variables") |> Util.to_assoc,
+        json |> Util.member("operationName") |> Util.to_string,
+      ) {
+      | (query, variables, operation_name) =>
+        switch (Graphql_parser.parse(query)) {
+        | Ok(doc) =>
+          Ok((
+            doc,
+            (variables :> list((string, Graphql_parser.const_value))),
+            operation_name,
+          ))
+        | Error(err) => Error(`ParseError(err))
+        }
+      | exception (Util.Type_error(err, t)) => Error(`ParseError(err))
+      | exception _ =>
+        Error(
+          `ParseError(
+            "Something went wrong while parsing the request body. A GraphQL request body usually contains a `query` string object, a `variables` JSON object and an `operationName` string.",
+          ),
         )
-      | Error(err) => raise(ParseError(err))
       }
-    | exception (Util.Type_error(err, t)) => raise(ParseError(err))
-    | exception _ =>
-      raise(
-        ParseError(
-          "Something went wrong while parsing the request body. A GraphQL request body usually contains a `query` string object, a `variables` JSON object and an `operationName` string.",
-        ),
-      )
+    | exception (Yojson.Json_error(err)) => Error(`ParseError(err))
     };
   };
 };
@@ -56,7 +57,7 @@ module App = {
         switch (ctx.body()) {
         | Some(body_string) =>
           switch (body_string |> BodyParser.to_graphql) {
-          | (doc, variables, operation_name) =>
+          | Ok((doc, variables, operation_name)) =>
             /* Execute the Document with the Ctx and the Schema */
             switch (
               Graphql.Schema.execute(
@@ -93,7 +94,7 @@ module App = {
                 err |> Yojson.Basic.to_string,
               ))
             }
-          | exception (BodyParser.ParseError(err)) =>
+          | Error(`ParseError(err)) =>
             `With_status((
               400 |> Httpaf.Status.of_code,
               "Failed to parse request body: " ++ err,

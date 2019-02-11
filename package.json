@@ -19,6 +19,7 @@
     "@opam/logs": "*",
     "@opam/merlin": "*",
     "@opam/odoc": "*",
+    "@opam/result": "*",
     "ocaml": "~4.7.0",
     "refmterr": "*"
   },
