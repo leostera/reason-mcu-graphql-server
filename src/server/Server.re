@@ -1,149 +1,118 @@
-open Lwt.Infix;
-
-let respond_with_error = (reqd, err) => {
-  let res =
-    Httpaf.Response.create(
-      ~headers=
-        Httpaf.Headers.of_list([
-          ("Content-Length", err |> String.length |> string_of_int),
-        ]),
-      `Internal_server_error,
+module BodyParser: {
+  type error = [ | `ParseError(string)];
+  let to_graphql:
+    string =>
+    result(
+      (
+        Graphql_parser.document,
+        list((string, Graphql_parser.const_value)),
+        string,
+      ),
+      error,
     );
-  Logs.err(m => m("%s", err));
-  Httpaf.Reqd.respond_with_string(reqd, res, err);
-  Lwt.return_unit;
-};
+} = {
+  type error = [ | `ParseError(string)];
 
-let read_body = reqd => {
-  open Httpaf;
-  let (next, awake) = Lwt.wait();
+  open Yojson.Basic;
 
-  Lwt.async(() => {
-    let body = reqd |> Reqd.request_body;
-    let body_str = ref("");
-    let on_eof = () => Lwt.wakeup_later(awake, body_str^);
-    let rec on_read = (request_data, ~off, ~len) => {
-      let read = Httpaf.Bigstring.to_string(~off, ~len, request_data);
-      body_str := body_str^ ++ read;
-      Body.schedule_read(body, ~on_read, ~on_eof);
-    };
-    Body.schedule_read(body, ~on_read, ~on_eof);
-    Lwt.return_unit;
-  });
-
-  next;
-};
-
-let handle_request = (reqd, schema, ctx) => {
-  open Httpaf;
-  let req = reqd |> Reqd.request;
-  Logs.debug(m =>
-    m("%s %s", req.meth |> Httpaf.Method.to_string, req.target)
-  );
-  switch (req.meth, req.target) {
-  | (`POST, "/graphql") =>
-    /* 1. Get the body */
-    reqd
-    |> read_body
-    >>= (
-      body => {
-        let query =
-          Yojson.Basic.(
-            body |> from_string |> Util.member("query") |> Util.to_string
-          );
-        Logs.debug(m => m("Query: %s", query));
-        /* 2. Parse the body into a GraphQL Document */
+  let to_graphql = body_string => {
+    switch (body_string |> from_string) {
+    | json =>
+      switch (
+        json |> Util.member("query") |> Util.to_string,
+        json |> Util.member("variables") |> Util.to_assoc,
+        json |> Util.member("operationName") |> Util.to_string,
+      ) {
+      | (query, variables, operation_name) =>
         switch (Graphql_parser.parse(query)) {
         | Ok(doc) =>
-          Logs.debug(m => m("Successfully parsed query!"));
-          /* 3. Execute the Document with the Ctx and the Schema */
-          switch (Graphql.Schema.execute(schema, ctx, doc)) {
-          | Ok(`Response(data)) =>
-            Logs.debug(m => m("Succesfully executed query!"));
-            /* 4. Serialize the Resulting Value */
-            let json_str = data |> Yojson.Basic.to_string;
-            /* 5. Respond with serialized resulting value */
-            let res =
-              Response.create(
-                ~headers=
-                  Headers.of_list([
-                    (
-                      "Content-Length",
-                      json_str |> String.length |> string_of_int,
-                    ),
-                  ]),
-                `OK,
-              );
-            Httpaf.Reqd.respond_with_string(reqd, res, json_str);
-            Lwt.return_unit;
-          | Ok(`Stream(_)) => Lwt.return_unit
-          | Error(err) =>
-            let err_str = err |> Yojson.Basic.to_string;
-            respond_with_error(reqd, err_str);
-          };
-        | Error(err) => respond_with_error(reqd, err)
-        };
+          Ok((
+            doc,
+            (variables :> list((string, Graphql_parser.const_value))),
+            operation_name,
+          ))
+        | Error(err) => Error(`ParseError(err))
+        }
+      | exception (Util.Type_error(err, t)) => Error(`ParseError(err))
+      | exception _ =>
+        Error(
+          `ParseError(
+            "Something went wrong while parsing the request body. A GraphQL request body usually contains a `query` string object, a `variables` JSON object and an `operationName` string.",
+          ),
+        )
       }
-    )
-  | (_, _) =>
-    let res =
-      Response.create(
-        ~headers=Headers.of_list([("Content-Length", "0")]),
-        `Not_implemented,
-      );
-    Httpaf.Reqd.respond_with_string(reqd, res, "");
-    Lwt.return_unit;
+    | exception (Yojson.Json_error(err)) => Error(`ParseError(err))
+    };
   };
 };
 
-let connection_handler:
-  (_, _, Unix.sockaddr, Lwt_unix.file_descr) => Lwt.t(unit) =
-  (schema, ctx) =>
-    Httpaf_lwt.Server.create_connection_handler(
-      ~config=?None,
-      ~request_handler=
-        (_client, reqd) =>
-          Lwt.async(() => handle_request(reqd, schema, ctx)),
-      ~error_handler=
-        (_client, ~request as _=?, error, start_response) => {
-          open Httpaf;
-          /** Originally from: https://github.com/anmonteiro/reason-graphql-experiment/blob/master/src/server/httpaf_server.re#L56-L118 */
-          let response_body = start_response(Headers.empty);
+module App = {
+  type state = {version: string};
+  let initial_state = {version: "1.0.0"};
 
-          switch (error) {
-          | `Exn(exn) =>
-            Body.write_string(response_body, Printexc.to_string(exn));
-            Body.write_string(response_body, "\n");
-          | `Bad_gateway as error
-          | `Bad_request as error
-          | `Internal_server_error as error =>
-            Body.write_string(
-              response_body,
-              Httpaf.Status.default_reason_phrase(error),
-            )
-          };
+  let route_handler: Httpkit.Server.Common.route_handler(state) =
+    (ctx, path) =>
+      switch (ctx.req.meth, path) {
+      | (`POST, ["graphql"]) =>
+        switch (ctx.body()) {
+        | Some(body_string) =>
+          switch (body_string |> BodyParser.to_graphql) {
+          | Ok((doc, variables, operation_name)) =>
+            /* Execute the Document with the Ctx and the Schema */
+            switch (
+              Graphql.Schema.execute(
+                Schema.schema,
+                (),
+                doc,
+                ~variables,
+                ~operation_name,
+              )
+            ) {
+            | Ok(`Response(data)) =>
+              /* Serialize the Resulting Value */
+              let json_str = data |> Yojson.Basic.to_string;
+              /* Respond with serialized resulting value */
+              `With_headers((
+                200 |> Httpaf.Status.of_code,
+                [
+                  (
+                    "Content-Length",
+                    json_str |> String.length |> string_of_int,
+                  ),
+                ],
+                json_str,
+              ));
+            | Ok(`Stream(_)) =>
+              /* Ignore the stream for now */
+              `With_status((
+                400 |> Httpaf.Status.of_code,
+                "Unsupported stream response",
+              ))
+            | Error(err) =>
+              `With_status((
+                400 |> Httpaf.Status.of_code,
+                err |> Yojson.Basic.to_string,
+              ))
+            }
+          | Error(`ParseError(err)) =>
+            `With_status((
+              400 |> Httpaf.Status.of_code,
+              "Failed to parse request body: " ++ err,
+            ))
+          }
+        | None =>
+          `With_status((400 |> Httpaf.Status.of_code, "Missing request body"))
+        }
+      | _ => `Unmatched
+      };
+};
 
-          Body.close_writer(response_body);
-        },
-    );
-
-let start = (port, schema, ctx) => {
-  let listening_address = Unix.ADDR_INET(Unix.inet_addr_loopback, port);
-
-  /* Set up the http server */
-  let _ =
-    Lwt_io.establish_server_with_client_socket(
-      listening_address,
-      /* Pass in the schema and context so the response handlers */
-      connection_handler(schema, ctx),
-    )
-    >>= (
-      /* can use it */
-      _ =>
-        Logs_lwt.app(m => m("Server running at http://localhost:%d", port))
-    );
-
-  /* Keep the server running */
-  let (forever, _) = Lwt.wait();
-  forever |> Lwt_main.run;
+let make = (~port, ~on_start) => {
+  Httpkit.Server.(
+    make(App.initial_state)
+    |> use(Common.log)
+    |> reply(Common.router(App.route_handler))
+    |> Httpkit_lwt.Server.Http.listen(~port, ~on_start)
+    |> Lwt_main.run
+  );
 };
